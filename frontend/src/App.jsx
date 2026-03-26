@@ -1,12 +1,19 @@
-const API_URL = import.meta.env.VITE_API_URL;
+// App — routing setup
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import Login from './pages/Login';
+import Dashboard from './pages/Dashboard';
 
-function App() {
+const PrivateRoute = ({ children }) => {
+  return localStorage.getItem('token') ? children : <Navigate to="/" />;
+};
+
+export default function App() {
   return (
-    <div>
-      <h1>App</h1>
-      <p>API: {API_URL}</p>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Login />} />
+        <Route path="/dashboard" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
+      </Routes>
+    </BrowserRouter>
   );
 }
-
-export default App;
