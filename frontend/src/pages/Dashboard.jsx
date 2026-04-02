@@ -16,11 +16,18 @@ export default function Dashboard() {
     // Get user info
     api.get('/auth/me').catch(() => {});
 
-    // Listen for real-time fraud alerts via Socket.io
+    // listen for fraud alerts
     socket.on('fraud_alert', (data) => {
       setAlert(data);
     });
-    return () => socket.off('fraud_alert');
+    // auto-refresh transaction list when bank simulator generates new transaction
+    socket.on('new_transaction', () => {
+      setRefresh(r => r + 1);
+    });
+    return () => {
+      socket.off('fraud_alert');
+      socket.off('new_transaction');
+    };
   }, []);
 
   const handleFeedback = async (feedback) => {

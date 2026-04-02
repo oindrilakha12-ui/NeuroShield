@@ -8,6 +8,7 @@ const connectDB = require('./db');
 
 const authRoutes = require('./routes/authRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
+const startBankSimulator = require('./services/bankSimulator');
 
 const app = express();
 const server = http.createServer(app);
@@ -51,5 +52,9 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 
 connectDB().then(() => {
-  server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    // start fake bank simulator after server is up
+    startBankSimulator(io, 5); // generates a transaction every 5 seconds
+  });
 });
