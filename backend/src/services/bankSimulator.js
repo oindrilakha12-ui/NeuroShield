@@ -5,7 +5,7 @@ const Transaction = require('../models/Transaction');
 const FraudLog = require('../models/FraudLog');
 const User = require('../models/User');
 
-// nearby cities — realistic travel patterns (no random Chennai → New York jumps)
+// nearby cities — realistic travel patterns
 const nearbyLocations = {
   'Chennai':   ['Chennai', 'Bangalore', 'Hyderabad'],
   'Mumbai':    ['Mumbai', 'Pune', 'Surat'],
@@ -16,26 +16,28 @@ const nearbyLocations = {
   'Pune':      ['Pune', 'Mumbai', 'Nashik'],
 };
 
-// suspicious locations — far away from base
 const suspiciousLocations = ['Dubai', 'London', 'New York', 'Singapore', 'Tokyo'];
+const defaultDevices      = ['iPhone 14', 'Samsung Galaxy', 'OnePlus', 'MacBook', 'Windows PC'];
+const defaultLocations    = Object.keys(nearbyLocations);
 
-// user profiles — each user has a base behavior
-const userProfiles = {};
+// get or create user profile — now uses DB (User.profile)
+async function getProfile(user) {
+  // if profile already saved in DB, use it
+  if (user.profile && user.profile.baseLocation) {
+    return user.profile;
+  }
 
-// build or get profile for a user
-function getProfile(userId, email) {
-  if (userProfiles[userId]) return userProfiles[userId];
+  // first time — assign random base profile and save to DB
+  const baseLocation = defaultLocations[Math.floor(Math.random() * defaultLocations.length)];
+  const baseDevice   = defaultDevices[Math.floor(Math.random() * defaultDevices.length)];
+  const avgAmount    = Math.floor(Math.random() * 8000) + 2000;
 
-  // assign a base profile when first seen
-  const baseLocations = Object.keys(nearbyLocations);
-  const baseLocation  = baseLocations[Math.floor(Math.random() * baseLocations.length)];
-  const devices       = ['iPhone 14', 'Samsung Galaxy', 'OnePlus', 'MacBook', 'Windows PC'];
-  const baseDevice    = devices[Math.floor(Math.random() * devices.length)];
-  const avgAmount     = Math.floor(Math.random() * 8000) + 2000; // 2000–10000
+  await User.findByIdAndUpdate(user._id, {
+    profile: { baseLocation, baseDevice, avgAmount }
+  });
 
-  userProfiles[userId] = { baseLocation, baseDevice, avgAmount };
-  console.log(`[BankSim] 👤 Profile created for ${email} | Base: ${baseLocation} | Device: ${baseDevice} | Avg: ₹${avgAmount}`);
-  return userProfiles[userId];
+  console.log(`[BankSim] 👤 Profile saved for ${user.email} | ${baseLocation} | ${baseDevice} | avg ₹${avgAmount}`);
+  return { baseLocation, baseDevice, avgAmount };
 }
 
 // helper — amount near average (±30%)
@@ -96,7 +98,7 @@ async function simulateTransaction(io) {
     }
 
     const user    = users[Math.floor(Math.random() * users.length)];
-    const profile = getProfile(String(user._id), user.email);
+    const profile = await getProfile(user);  // loads from DB
     const time    = currentTimeSeconds();
 
     // 75% normal, 25% suspicious

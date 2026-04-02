@@ -2,6 +2,7 @@
 const axios = require('axios');
 const Transaction = require('../models/Transaction');
 const FraudLog = require('../models/FraudLog');
+const User = require('../models/User');
 
 // helper — figure out if time is night (10pm to 6am)
 function isNightTime(timeInSeconds) {
@@ -9,33 +10,70 @@ function isNightTime(timeInSeconds) {
   return hour >= 22 || hour < 6;
 }
 
-// helper — calculate rule based risk score using user behavior
+// helper — build or update user profile from their transaction history
+async function ensureUserProfile(userId) {
+  const user = await User.findById(userId);
+  if (!user) return null;
+
+  // if profile already set, return it
+  if (user.profile && user.profile.baseLocation) return user.profile;
+
+  // build profile from last 10 transactions
+  const recentTxs = await Transaction.find({ userId }).sort({ createdAt: -1 }).limit(10);
+  if (recentTxs.length === 0) return null;
+
+  // most common location and device
+  const locationCount = {};
+  const deviceCount = {};
+  let totalAmount = 0;
+
+  recentTxs.forEach(tx => {
+    locationCount[tx.location] = (locationCount[tx.location] || 0) + 1;
+    deviceCount[tx.device]     = (deviceCount[tx.device] || 0) + 1;
+    totalAmount += tx.amount;
+  });
+
+  const baseLocation = Object.keys(locationCount).sort((a, b) => locationCount[b] - locationCount[a])[0];
+  const baseDevice   = Object.keys(deviceCount).sort((a, b) => deviceCount[b] - deviceCount[a])[0];
+  const avgAmount    = Math.floor(totalAmount / recentTxs.length);
+
+  // save profile to DB
+  await User.findByIdAndUpdate(userId, { profile: { baseLocation, baseDevice, avgAmount } });
+  console.log(`[Profile] Built for user ${user.email}: ${baseLocation} | ${baseDevice} | avg ₹${avgAmount}`);
+
+  return { baseLocation, baseDevice, avgAmount };
+}
+
+// helper — calculate rule based risk score using user profile
 async function calculateRisk(userId, amount, location, device, time) {
   let riskScore = 0;
   let reasons = [];
 
-  // get last transaction of this user
   const lastTx = await Transaction.findOne({ userId }).sort({ createdAt: -1 });
+  const profile = await ensureUserProfile(userId);
 
-  // high amount check
-  if (amount > 50000) {
+  // high amount check — compare against profile avg if available
+  const highAmountThreshold = profile && profile.avgAmount ? profile.avgAmount * 5 : 50000;
+  if (amount > highAmountThreshold) {
     riskScore += 30;
     reasons.push('High amount');
     console.log('risk +30: high amount');
   }
 
-  // new location check
-  if (lastTx && lastTx.location !== location) {
+  // new location — compare against profile base location
+  const baseLocation = profile ? profile.baseLocation : (lastTx ? lastTx.location : null);
+  if (baseLocation && baseLocation !== location) {
     riskScore += 25;
     reasons.push('New location');
-    console.log('risk +25: new location', lastTx.location, '->', location);
+    console.log('risk +25: location changed from', baseLocation, '->', location);
   }
 
-  // new device check
-  if (lastTx && lastTx.device !== device) {
+  // new device — compare against profile base device
+  const baseDevice = profile ? profile.baseDevice : (lastTx ? lastTx.device : null);
+  if (baseDevice && baseDevice !== device) {
     riskScore += 20;
     reasons.push('New device');
-    console.log('risk +20: new device');
+    console.log('risk +20: device changed from', baseDevice, '->', device);
   }
 
   // odd time check
@@ -45,13 +83,11 @@ async function calculateRisk(userId, amount, location, device, time) {
     console.log('risk +15: night time transaction');
   }
 
-  // figure out status
   let status = 'SAFE';
   if (riskScore >= 70) status = 'FRAUD';
   else if (riskScore >= 40) status = 'SUSPICIOUS';
 
   const reason = reasons.length > 0 ? reasons.join(' and ') : 'Normal transaction';
-
   return { riskScore, status, reason };
 }
 
