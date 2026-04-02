@@ -1,143 +1,119 @@
-// Transaction controller — create transaction, call ML, store fraud log
+// Transaction controller — create transaction, calculate fraud risk, store fraud log
 const axios = require('axios');
 const Transaction = require('../models/Transaction');
 const FraudLog = require('../models/FraudLog');
 const User = require('../models/User');
 
-// helper — figure out if time is night (10pm to 6am)
-function isNightTime(timeInSeconds) {
-  const hour = Math.floor(timeInSeconds / 3600) % 24;
-  return hour >= 22 || hour < 6;
-}
-
-// helper — build or update user profile from their transaction history
-async function ensureUserProfile(userId) {
+// ─────────────────────────────────────────────
+// helper — get user profile from DB
+// ─────────────────────────────────────────────
+async function getUserProfile(userId) {
   const user = await User.findById(userId);
-  if (!user) return null;
-
-  // if profile already set, return it
-  if (user.profile && user.profile.baseLocation) return user.profile;
-
-  // build profile from last 10 transactions
-  const recentTxs = await Transaction.find({ userId }).sort({ createdAt: -1 }).limit(10);
-  if (recentTxs.length === 0) return null;
-
-  // most common location and device
-  const locationCount = {};
-  const deviceCount = {};
-  let totalAmount = 0;
-
-  recentTxs.forEach(tx => {
-    locationCount[tx.location] = (locationCount[tx.location] || 0) + 1;
-    deviceCount[tx.device]     = (deviceCount[tx.device] || 0) + 1;
-    totalAmount += tx.amount;
-  });
-
-  const baseLocation = Object.keys(locationCount).sort((a, b) => locationCount[b] - locationCount[a])[0];
-  const baseDevice   = Object.keys(deviceCount).sort((a, b) => deviceCount[b] - deviceCount[a])[0];
-  const avgAmount    = Math.floor(totalAmount / recentTxs.length);
-
-  // save profile to DB
-  await User.findByIdAndUpdate(userId, { profile: { baseLocation, baseDevice, avgAmount } });
-  console.log(`[Profile] Built for user ${user.email}: ${baseLocation} | ${baseDevice} | avg ₹${avgAmount}`);
-
-  return { baseLocation, baseDevice, avgAmount };
+  if (user && user.profile && user.profile.baseLocation) {
+    return user.profile;
+  }
+  return null;
 }
 
-// helper — calculate rule based risk score using user profile
-async function calculateRisk(userId, amount, location, device, time) {
-  let riskScore = 0;
+// ─────────────────────────────────────────────
+// helper — core fraud risk calculation
+// compares transaction against user profile
+// ─────────────────────────────────────────────
+async function calculateRisk(userId, amount, location, device) {
+  let risk = 0;
   let reasons = [];
 
-  const lastTx = await Transaction.findOne({ userId }).sort({ createdAt: -1 });
-  const profile = await ensureUserProfile(userId);
+  const profile = await getUserProfile(userId);
 
-  // high amount check — compare against profile avg if available
-  const highAmountThreshold = profile && profile.avgAmount ? profile.avgAmount * 5 : 50000;
-  if (amount > highAmountThreshold) {
-    riskScore += 30;
-    reasons.push('High amount');
-    console.log('risk +30: high amount');
+  // print profile vs current transaction for debugging
+  console.log('─────────────────────────────────');
+  console.log('[RiskCheck] User Profile  :', profile);
+  console.log('[RiskCheck] New Transaction:', { amount, location, device });
+  console.log('─────────────────────────────────');
+
+  if (!profile) {
+    // no profile yet — cant compare, return safe
+    console.log('[RiskCheck] No profile found, skipping risk check');
+    return { risk: 0, status: 'SAFE', reasons: ['No profile data yet'] };
   }
 
-  // new location — compare against profile base location
-  const baseLocation = profile ? profile.baseLocation : (lastTx ? lastTx.location : null);
-  if (baseLocation && baseLocation !== location) {
-    riskScore += 25;
+  // check 1 — location changed
+  if (location !== profile.baseLocation) {
+    risk += 30;
     reasons.push('New location');
-    console.log('risk +25: location changed from', baseLocation, '->', location);
+    console.log(`[RiskCheck] +30 | Location changed: ${profile.baseLocation} → ${location}`);
   }
 
-  // new device — compare against profile base device
-  const baseDevice = profile ? profile.baseDevice : (lastTx ? lastTx.device : null);
-  if (baseDevice && baseDevice !== device) {
-    riskScore += 20;
+  // check 2 — device changed
+  if (device !== profile.baseDevice) {
+    risk += 25;
     reasons.push('New device');
-    console.log('risk +20: device changed from', baseDevice, '->', device);
+    console.log(`[RiskCheck] +25 | Device changed: ${profile.baseDevice} → ${device}`);
   }
 
-  // odd time check
-  if (isNightTime(time)) {
-    riskScore += 15;
-    reasons.push('Odd time (night)');
-    console.log('risk +15: night time transaction');
+  // check 3 — amount way higher than usual
+  if (profile.avgAmount && amount > profile.avgAmount * 3) {
+    risk += 35;
+    reasons.push('High amount');
+    console.log(`[RiskCheck] +35 | High amount: ₹${amount} vs avg ₹${profile.avgAmount}`);
   }
 
+  // determine status
   let status = 'SAFE';
-  if (riskScore >= 70) status = 'FRAUD';
-  else if (riskScore >= 40) status = 'SUSPICIOUS';
+  if (risk >= 70)      status = 'FRAUD';
+  else if (risk >= 30) status = 'SUSPICIOUS';
 
-  const reason = reasons.length > 0 ? reasons.join(' and ') : 'Normal transaction';
-  return { riskScore, status, reason };
+  console.log(`[RiskCheck] Final → riskScore: ${risk} | status: ${status} | reasons: ${reasons.join(', ') || 'none'}`);
+
+  return { risk, status, reasons };
 }
 
+// ─────────────────────────────────────────────
 // POST /api/transactions
+// ─────────────────────────────────────────────
 const createTransaction = async (req, res) => {
   try {
     const { amount, time, location, device } = req.body;
     const userId = req.user.id;
 
-    // Save transaction
+    // save transaction
     const transaction = await Transaction.create({ userId, amount, time, location, device });
-    console.log('transaction saved:', transaction._id);
+    console.log('[Transaction] Saved:', transaction._id);
 
-    // calculate rule based risk
-    const { riskScore, status, reason } = await calculateRisk(userId, amount, location, device, time);
-    console.log('risk result:', riskScore, status, reason);
+    // calculate risk using user profile
+    const { risk: riskScore, status, reasons } = await calculateRisk(userId, amount, location, device);
 
-    // Call ML service (optional, wont crash if down)
+    // call ML service (optional — wont crash if down)
     let mlScore = 0;
     let isFraud = false;
     try {
-      const mlRes = await axios.post(`${process.env.ML_SERVICE_URL}/predict`, {
-        amount, time, location, device
-      });
+      const mlRes = await axios.post(`${process.env.ML_SERVICE_URL}/predict`, { amount, time, location, device });
       mlScore = mlRes.data.fraud_score;
       isFraud = mlRes.data.is_fraud;
-      console.log('ml score:', mlScore);
+      console.log('[ML] Score:', mlScore);
     } catch (mlErr) {
-      console.error('ML service not available, using rule-based only:', mlErr.message);
-      // fallback: use rule based score
+      // fallback to rule based
       mlScore = riskScore / 100;
       isFraud = status === 'FRAUD';
+      console.log('[ML] Service unavailable, using rule-based fallback');
     }
 
-    // combine ml + rule score (simple average)
+    // combine ml + rule score
     const combinedScore = parseFloat(((mlScore + riskScore / 100) / 2).toFixed(4));
 
-    // Save fraud log
+    // save fraud log
     const fraudLog = await FraudLog.create({
       transactionId: transaction._id,
-      score: combinedScore,
+      score:    combinedScore,
       isFraud,
       riskScore,
       status,
-      reason
+      reason: reasons.length > 0 ? reasons.join(' and ') : 'Normal transaction'
     });
 
-    // basic websocket placeholder
-    if (riskScore > 70) {
-      console.log('⚠️ Fraud Alert Triggered for transaction:', transaction._id);
+    // emit socket alert if fraud
+    if (riskScore >= 70) {
+      console.log('⚠️  Fraud Alert Triggered for transaction:', transaction._id);
       const io = req.app.get('io');
       if (io) {
         io.emit('fraud_alert', {
@@ -150,14 +126,17 @@ const createTransaction = async (req, res) => {
       }
     }
 
-    res.status(201).json({ transaction, riskScore, status, reason, fraudLog });
+    res.status(201).json({ transaction, riskScore, status, reasons, fraudLog });
+
   } catch (err) {
-    console.error('createTransaction error:', err.message);
+    console.error('[Transaction] Error:', err.message);
     res.status(500).json({ message: err.message });
   }
 };
 
+// ─────────────────────────────────────────────
 // GET /api/transactions
+// ─────────────────────────────────────────────
 const getTransactions = async (req, res) => {
   try {
     const transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 });
@@ -167,10 +146,12 @@ const getTransactions = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────
 // POST /api/transactions/:id/feedback
+// ─────────────────────────────────────────────
 const submitFeedback = async (req, res) => {
   try {
-    const { feedback } = req.body; // 'valid' or 'fraud'
+    const { feedback } = req.body;
     const log = await FraudLog.findOneAndUpdate(
       { transactionId: req.params.id },
       { feedback },
