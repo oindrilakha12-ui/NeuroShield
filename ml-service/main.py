@@ -1,13 +1,9 @@
 # main.py — FastAPI ML service for fraud prediction
 from fastapi import FastAPI
 from pydantic import BaseModel
-import joblib
-import numpy as np
+import random
 
 app = FastAPI()
-
-# Load trained model
-model = joblib.load('fraud_model.pkl')
 
 class TransactionInput(BaseModel):
     amount: float
@@ -21,19 +17,27 @@ def health():
 
 @app.post("/predict")
 def predict(data: TransactionInput):
-    # Use amount and time as features
-    features = np.array([[data.amount, data.time]])
+    # simple rule based dummy ML for now
+    fraud_score = 0.0
     
-    # Isolation Forest: -1 = anomaly, 1 = normal
-    prediction = model.predict(features)[0]
-    score = model.decision_function(features)[0]
+    # high amount increases score
+    if data.amount > 50000:
+        fraud_score += 0.3
+    elif data.amount > 20000:
+        fraud_score += 0.15
     
-    # Normalize score to 0-1 range (higher = more fraudulent)
-    fraud_score = round(float(1 - (score + 0.5)), 4)
-    fraud_score = max(0.0, min(1.0, fraud_score))
-    is_fraud = prediction == -1
+    # night time increases score
+    hour = int(data.time / 3600) % 24
+    if hour >= 22 or hour < 6:
+        fraud_score += 0.2
+    
+    # add some randomness to simulate ML
+    fraud_score += random.uniform(0, 0.2)
+    fraud_score = min(fraud_score, 1.0)
+    
+    is_fraud = fraud_score > 0.6
 
     return {
-        "fraud_score": fraud_score,
+        "fraud_score": round(fraud_score, 4),
         "is_fraud": is_fraud
     }
