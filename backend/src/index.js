@@ -19,7 +19,7 @@ const io = new Server(server, {
 });
 
 // Make io accessible in controllers
-app.set('io', io);
+  app.set('io', io);
 
 app.use(cors());
 app.use(express.json());
