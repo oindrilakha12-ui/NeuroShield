@@ -1,4 +1,4 @@
-# AI-Powered Fraud Detection App
+# AI-Powered Fraud
 
 A full-stack fraud detection system using Node.js/Express, Python/FastAPI (Isolation Forest ML), React, MongoDB, JWT Auth, and Socket.io real-time alerts.
 
